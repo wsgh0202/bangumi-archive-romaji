@@ -61,7 +61,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--extract-dir",
-        default="bangumi_archive",
+        default="build/bangumi_archive",
         help="zip 解压目标目录。",
     )
     parser.add_argument(

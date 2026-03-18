@@ -234,12 +234,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--anime",
-        default="anime-offline-database.jsonl",
+        default="build/anime-offline-database.jsonl",
         help="anime-offline JSONL 路径",
     )
-    parser.add_argument("--bangumi", default="bangumi.jsonl", help="Bangumi JSONL 路径")
     parser.add_argument(
-        "--output", default="bangumi.alias_merged.jsonl", help="输出 JSONL 路径"
+        "--bangumi",
+        default="build/bangumi_archive/subject.jsonlines",
+        help="Bangumi JSONL 路径",
+    )
+    parser.add_argument(
+        "--output", default="build/bangumi_alias_merged.jsonl", help="输出 JSONL 路径"
     )
     args = parser.parse_args()
 

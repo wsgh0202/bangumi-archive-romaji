@@ -118,7 +118,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--output-jsonl",
-        default="anime-offline-database.jsonl",
+        default="build/anime-offline-database.jsonl",
         help="解压后 jsonl 文件输出路径。",
     )
     parser.add_argument(
