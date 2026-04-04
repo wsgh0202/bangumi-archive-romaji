@@ -29,8 +29,6 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y zstd
 
-      # ── 1. 下载原始数据库 ──────────────────────────────────
-
       - name: Update Bangumi Archive
         id: update_bangumi
         run: |
@@ -79,13 +77,9 @@ jobs:
             echo "检测到数据源更新，继续构建。"
           fi
 
-      # ── 2. 合并元数据 ────────────────────────────────────
-
       - name: Merge aliases
         if: steps.check_build.outputs.skip != 'true'
         run: python merge_aliases.py
-
-      # ── 3. 打包发布产物 ──────────────────────────────────
 
       - name: Package release ZIP
         if: steps.check_build.outputs.skip != 'true'
@@ -95,8 +89,6 @@ jobs:
         if: steps.check_build.outputs.skip != 'true'
         id: release_tag
         run: echo "tag=v$(date -u +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
-
-      # ── 4. 生成发布说明与版本元数据 ──────────────────────
 
       - name: Render release notes
         if: steps.check_build.outputs.skip != 'true'
@@ -108,8 +100,6 @@ jobs:
           python release_ci.py write-latest-json \
             --github-repo "${{ github.repository }}" \
             --release-tag "${{ steps.release_tag.outputs.tag }}"
-
-      # ── 5. 发布版本 ─────────────────────────────────────
 
       - name: Create GitHub Release
         if: steps.check_build.outputs.skip != 'true'
@@ -132,8 +122,6 @@ jobs:
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ── 6. 提交版本元数据变更 ───────────────────────────
 
       - name: Commit version metadata
         if: steps.check_build.outputs.skip != 'true'
