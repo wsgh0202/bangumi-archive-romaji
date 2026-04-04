@@ -79,7 +79,7 @@ jobs:
 
       - name: Merge aliases
         if: steps.check_build.outputs.skip != 'true'
-        run: python merge_aliases.py
+        run: python merge_aliases.py --report-markdown dist/merge-aliases-report.md
 
       - name: Package release ZIP
         if: steps.check_build.outputs.skip != 'true'
@@ -92,7 +92,10 @@ jobs:
 
       - name: Render release notes
         if: steps.check_build.outputs.skip != 'true'
-        run: python release_ci.py render-release-notes --output dist/release-notes.md
+        run: |
+          python release_ci.py render-release-notes \
+            --append-markdown dist/merge-aliases-report.md \
+            --output dist/release-notes.md
 
       - name: Write latest.json
         if: steps.check_build.outputs.skip != 'true'

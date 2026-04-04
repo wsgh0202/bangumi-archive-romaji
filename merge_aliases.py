@@ -2,11 +2,23 @@
 import argparse
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Set
 
 
 ALIAS_BLOCK_RE = re.compile(r"(\|别名=\{)(.*?)(\})", re.DOTALL)
+
+
+@dataclass
+class MergeStats:
+    anime_entries: int
+    bangumi_entries: int = 0
+    bangumi_ani_entries: int = 0
+    matched_entries: int = 0
+    identical_entries: int = 0
+    merged_entries: int = 0
+    written_entries: int = 0
 
 
 def normalize(text: str) -> str:
@@ -65,6 +77,40 @@ def replace_infobox_aliases_raw(raw_text: str, aliases: List[str]) -> str:
     new_body = newline.join(alias_lines)
     replacement = f"{m.group(1)}{newline}{new_body}{newline}{m.group(3)}"
     return raw_text[: m.start()] + replacement + raw_text[m.end() :]
+
+
+def render_stats_markdown(stats: MergeStats) -> str:
+    """将合并统计渲染为 Markdown 文本。"""
+    lines = [
+        "### 合并统计",
+        "",
+        f"- anime-offline-database 总条目数：`{stats.anime_entries}`",
+        f"- Bangumi Archive 总条目数：`{stats.bangumi_entries}`",
+        f"- Bangumi Archive 动画条目数：`{stats.bangumi_ani_entries}`",
+        f"- 匹配到的条目总数：`{stats.matched_entries}`",
+        f"- 相同的条目数（匹配但无需更新）：`{stats.identical_entries}`",
+        f"- 已合并的条目数：`{stats.merged_entries}`",
+        f"- 合并文件条目总数：`{stats.written_entries}`",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_markdown_report(path: Path, stats: MergeStats) -> None:
+    """将合并统计写入 Markdown 文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_stats_markdown(stats), encoding="utf-8")
+
+
+def print_summary(output_path: Path, stats: MergeStats) -> None:
+    """打印人类可读的合并统计摘要。"""
+    print(f"完成：已写入到 {output_path}")
+    print(f"anime-offline-database 总条目数：{stats.anime_entries}")
+    print(f"Bangumi Archive 总条目数：{stats.bangumi_entries}")
+    print(f"Bangumi Archive 动画条目数：{stats.bangumi_ani_entries}")
+    print(f"匹配到的条目总数：{stats.matched_entries}")
+    print(f"相同的条目数（匹配但无需更新）：{stats.identical_entries}")
+    print(f"已合并的条目数：{stats.merged_entries}")
+    print(f"合并文件条目总数：{stats.written_entries}")
 
 
 def read_jsonl(path: Path) -> List[Dict]:
@@ -139,14 +185,15 @@ def build_anime_name_index(anime_rows: List[Dict]) -> Dict[str, List[str]]:
 
 def merge_aliases_stream(
     anime_rows: List[Dict], bangumi_path: Path, output_path: Path
-) -> int:
+) -> MergeStats:
     """逐条读取 Bangumi JSONL，并将合并结果逐条写入输出文件。
 
     Returns:
-        int: 写出的记录条数
+        MergeStats: 合并统计结果
     """
     anime_index = build_anime_name_index(anime_rows)
-    written = 0
+    stats = MergeStats(anime_entries=len(anime_rows))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with (
         bangumi_path.open("r", encoding="utf-8") as src,
@@ -157,15 +204,21 @@ def merge_aliases_stream(
             if not line:
                 continue
 
+            stats.bangumi_entries += 1
+
             subject = json.loads(line)
 
             # 仅处理 type=2（动画）条目
-            type = subject.get("type") if isinstance(subject.get("type"), int) else 0
-            if type != 2:
+            subject_type = (
+                subject.get("type") if isinstance(subject.get("type"), int) else 0
+            )
+            if subject_type != 2:
                 dst.write(line)
                 dst.write("\n")
-                written += 1
+                stats.written_entries += 1
                 continue
+
+            stats.bangumi_ani_entries += 1
 
             # 读取名称相关字段
             name = subject.get("name") if isinstance(subject.get("name"), str) else ""
@@ -194,6 +247,9 @@ def merge_aliases_stream(
                     matched_name_sets = anime_index[key]
                     break
 
+            if matched_name_sets:
+                stats.matched_entries += 1
+
             # 保持别名顺序稳定：先保留原有别名，再追加新合并名称。
             merged_aliases: List[str] = list(existing_aliases)
             merged_norm_aliases: Set[str] = {normalize(a) for a in existing_aliases}
@@ -212,7 +268,8 @@ def merge_aliases_stream(
             if merged_aliases == existing_aliases:
                 dst.write(line)
                 dst.write("\n")
-                written += 1
+                stats.identical_entries += 1 if matched_name_sets else 0
+                stats.written_entries += 1
                 continue
 
             # 每行最多一个 |别名 区块，直接替换该命中片段即可，其他内容保持原样。
@@ -220,9 +277,10 @@ def merge_aliases_stream(
 
             dst.write(new_line)
             dst.write("\n")
-            written += 1
+            stats.merged_entries += 1 if matched_name_sets else 0
+            stats.written_entries += 1
 
-    return written
+    return stats
 
 
 def main() -> None:
@@ -245,12 +303,25 @@ def main() -> None:
     parser.add_argument(
         "--output", default="build/bangumi_alias_merged.jsonl", help="输出 JSONL 路径"
     )
+    parser.add_argument(
+        "--report-markdown",
+        help="可选：将合并统计写入指定 Markdown 路径。",
+    )
     args = parser.parse_args()
 
-    anime_rows = read_jsonl(Path(args.anime))
-    written = merge_aliases_stream(anime_rows, Path(args.bangumi), Path(args.output))
+    anime_path = Path(args.anime)
+    bangumi_path = Path(args.bangumi)
+    output_path = Path(args.output)
 
-    print(f"完成：已写入 {written} 条记录到 {args.output}")
+    anime_rows = read_jsonl(anime_path)
+    stats = merge_aliases_stream(anime_rows, bangumi_path, output_path)
+
+    print_summary(output_path, stats)
+
+    if args.report_markdown:
+        report_path = Path(args.report_markdown)
+        write_markdown_report(report_path, stats)
+        print(f"已生成合并统计报告：{report_path}")
 
 
 if __name__ == "__main__":

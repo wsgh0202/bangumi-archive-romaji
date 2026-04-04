@@ -20,6 +20,16 @@ DEFAULT_DIST_DIR = Path("dist")
 DEFAULT_LATEST_JSON = Path("version/latest.json")
 
 
+def read_markdown_sections(paths: list[str] | None) -> list[str]:
+    """读取额外的 Markdown 片段，并过滤掉空内容。"""
+    sections: list[str] = []
+    for raw_path in paths or []:
+        content = Path(raw_path).read_text(encoding="utf-8").strip()
+        if content:
+            sections.append(content)
+    return sections
+
+
 def load_json(path: Path) -> dict[str, Any]:
     """读取 UTF-8 编码的 JSON 文件并返回解析结果。"""
     return json.loads(path.read_text(encoding="utf-8"))
@@ -182,6 +192,7 @@ def render_release_notes(args: argparse.Namespace) -> int:
     """根据记录的 Bangumi 与 anime 源数据生成发布说明。"""
     bangumi = load_json(Path(args.bangumi_version_file))
     anime = load_json(Path(args.anime_version_file))
+    extra_sections = read_markdown_sections(args.append_markdown)
 
     # 统一整理源数据字段，缺失值回退为可读的默认内容。
     bangumi_name = str(bangumi.get("name") or "未知")
@@ -199,7 +210,7 @@ def render_release_notes(args: argparse.Namespace) -> int:
 
     # 拼接发布说明
     lines = [
-        "## 数据版本",
+        "### 数据版本",
         "",
         "- [Bangumi Archive](https://github.com/bangumi/Archive)",
         f"  - 版本：`{bangumi_name}`",
@@ -211,6 +222,10 @@ def render_release_notes(args: argparse.Namespace) -> int:
         f"  - 地址：<{anime_url or '无'}>",
         f"  - sha256：`{anime_sha256 or '无'}`",
     ]
+
+    if extra_sections:
+        lines.extend(["", *extra_sections])
+
     content = "\n".join(lines) + "\n"
 
     # 在 CI 中写入文件，本地调试时也支持直接输出到标准输出。
@@ -314,6 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--anime-version-file",
         default=str(DEFAULT_ANIME_VERSION_FILE),
         help="anime-offline-database 版本元数据文件。",
+    )
+    notes_parser.add_argument(
+        "--append-markdown",
+        action="append",
+        help="追加写入 release notes 的 Markdown 文件，可重复指定。",
     )
     notes_parser.add_argument(
         "--output", help="说明文本输出路径；未提供时输出到 stdout。"
