@@ -1,0 +1,145 @@
+name: Build and Release
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "强制重新构建（忽略版本缓存，重新下载所有数据源）"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      # ── 1. 下载原始数据库 ──────────────────────────────────
+
+      - name: Update Bangumi Archive
+        id: update_bangumi
+        run: |
+          FORCE_FLAG=""
+          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
+            FORCE_FLAG="--force-download"
+          fi
+          OUTPUT=$(python update_bangumi_archive.py $FORCE_FLAG 2>&1) || EXIT_CODE=$?
+          echo "$OUTPUT"
+          if [[ ${EXIT_CODE:-0} -ne 0 ]]; then
+            exit $EXIT_CODE
+          fi
+          if echo "$OUTPUT" | grep -q "已是最新"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update anime-offline-database
+        id: update_anime
+        run: |
+          FORCE_FLAG=""
+          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
+            FORCE_FLAG="--force-download"
+          fi
+          OUTPUT=$(python update_anime_offline_database.py $FORCE_FLAG 2>&1) || EXIT_CODE=$?
+          echo "$OUTPUT"
+          if [[ ${EXIT_CODE:-0} -ne 0 ]]; then
+            exit $EXIT_CODE
+          fi
+          if echo "$OUTPUT" | grep -q "已是最新"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check if build is needed
+        id: check_build
+        run: |
+          if [[ "${{ steps.update_bangumi.outputs.changed }}" == "false" ]] && \
+             [[ "${{ steps.update_anime.outputs.changed }}" == "false" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "两个数据源均无更新，跳过构建。"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "检测到数据源更新，继续构建。"
+          fi
+
+      # ── 2. 合并元数据 ────────────────────────────────────
+
+      - name: Merge aliases
+        if: steps.check_build.outputs.skip != 'true'
+        run: python merge_aliases.py
+
+      # ── 3. 打包发布产物 ──────────────────────────────────
+
+      - name: Package release ZIP
+        if: steps.check_build.outputs.skip != 'true'
+        run: python release_ci.py package-zip
+
+      - name: Generate release tag
+        if: steps.check_build.outputs.skip != 'true'
+        id: release_tag
+        run: echo "tag=v$(date -u +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      # ── 4. 生成发布说明与版本元数据 ──────────────────────
+
+      - name: Render release notes
+        if: steps.check_build.outputs.skip != 'true'
+        run: python release_ci.py render-release-notes --output dist/release-notes.md
+
+      - name: Write latest.json
+        if: steps.check_build.outputs.skip != 'true'
+        run: |
+          python release_ci.py write-latest-json \
+            --github-repo "${{ github.repository }}" \
+            --release-tag "${{ steps.release_tag.outputs.tag }}"
+
+      # ── 5. 发布版本 ─────────────────────────────────────
+
+      - name: Create GitHub Release
+        if: steps.check_build.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: ${{ steps.release_tag.outputs.tag }}
+          body_path: dist/release-notes.md
+          files: dist/*.zip
+
+      - name: Delete old releases (keep latest 3)
+        if: steps.check_build.outputs.skip != 'true'
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' | \
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Deleting release: $tag"
+            gh release delete "$tag" --yes --cleanup-tag
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 6. 提交版本元数据变更 ───────────────────────────
+
+      - name: Commit version metadata
+        if: steps.check_build.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python release_ci.py commit-version \
+            --message "chore: update version metadata [skip ci]"
+          git push
