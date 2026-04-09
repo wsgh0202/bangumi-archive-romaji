@@ -79,6 +79,98 @@ def download_file(url: str, output_path: Path) -> None:
         shutil.copyfileobj(resp, dst)
 
 
+def resolve_anime_offline_database_state(
+    version_path: Path,
+) -> tuple[Dict[str, Any], bool]:
+    """返回最新 release 资源信息，以及其相对本地版本记录是否发生变化。"""
+    latest_release = fetch_json(REPO_RELEASE_API)
+    if not isinstance(latest_release, dict):
+        raise RuntimeError("release API 返回结果格式异常。")
+
+    asset = find_asset(latest_release, TARGET_ASSET_NAME)
+    asset_digest = (asset.get("digest") or "").strip()
+    if asset_digest.startswith("sha256:"):
+        asset_digest = asset_digest.split(":", 1)[1]
+
+    current = load_json(version_path)
+    current_digest = str(current.get("sha256", "")).strip()
+    latest_release["_target_asset"] = asset
+    return latest_release, current_digest != asset_digest
+
+
+def check_anime_offline_database_changed(
+    version_file: str = "version/anime-offline-database.json",
+) -> bool:
+    """检查 anime-offline-database 相对本地版本记录是否发生变化。"""
+    _, changed = resolve_anime_offline_database_state(Path(version_file))
+    return changed
+
+
+def update_anime_offline_database(
+    version_file: str = "version/anime-offline-database.json",
+    output_jsonl: str = "build/anime-offline-database.jsonl",
+    download_dir: str = "downloads",
+    force_download: bool = False,
+) -> bool:
+    """执行 anime-offline-database 更新，并返回数据源是否发生变化。"""
+    version_path = Path(version_file)
+    output_jsonl_path = Path(output_jsonl)
+    download_dir_path = Path(download_dir)
+
+    # 1) 获取最新 release 资源，并与本地记录比较是否发生更新。
+    latest_release, has_new_version = resolve_anime_offline_database_state(version_path)
+    asset = latest_release["_target_asset"]
+
+    release_name = latest_release.get("name") or latest_release.get("tag_name") or ""
+    browser_download_url = asset.get("browser_download_url")
+    asset_name = asset.get("name")
+    if not browser_download_url or not asset_name:
+        raise RuntimeError("目标资源缺少下载地址或文件名。")
+
+    asset_digest = (asset.get("digest") or "").strip()
+    if asset_digest.startswith("sha256:"):
+        asset_digest = asset_digest.split(":", 1)[1]
+
+    changed = force_download or has_new_version
+
+    if force_download:
+        print("已启用强制下载，跳过本地版本记录比对。")
+
+    # 2) 若版本未变化且未强制下载，则直接结束，不处理本地构建输入。
+    if not force_download and not changed:
+        print("anime-offline-database 已是最新（digest 未变化）。")
+        return changed
+
+    # 3) 下载资源、校验完整性、解压并更新版本元数据。
+    zst_path = download_dir_path / asset_name
+    print(f"开始下载：{browser_download_url}")
+    download_file(browser_download_url, zst_path)
+
+    actual_sha256 = sha256_file(zst_path)
+    if asset_digest and actual_sha256 != asset_digest:
+        raise RuntimeError(
+            f"下载文件 SHA256 校验不一致。期望值={asset_digest} 实际值={actual_sha256}"
+        )
+
+    output_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"开始解压到：{output_jsonl_path}")
+    decompress_zst(zst_path, output_jsonl_path)
+
+    save_json(
+        version_path,
+        {
+            "release": release_name,
+            "tag": latest_release.get("tag_name", ""),
+            "asset": asset_name,
+            "sha256": actual_sha256,
+            "published_at": latest_release.get("published_at", ""),
+            "source": latest_release.get("html_url", ""),
+        },
+    )
+    print(f"版本元数据已更新：{version_path}")
+    return changed
+
+
 def decompress_zst(zst_path: Path, output_path: Path) -> None:
     """解压 zst 文件，优先使用 zstandard，回退到系统 zstd。"""
     # 1) 优先尝试 Python 依赖 zstandard。
@@ -107,7 +199,6 @@ def decompress_zst(zst_path: Path, output_path: Path) -> None:
 
 def main() -> int:
     """执行 anime-offline-database 更新流程。"""
-    # 1) 解析命令行参数。
     parser = argparse.ArgumentParser(
         description="从 anime-offline-database 最新 release 更新 JSONL，并基于 digest 判断是否需要更新。"
     )
@@ -133,70 +224,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    version_path = Path(args.version_file)
-    output_jsonl = Path(args.output_jsonl)
-    download_dir = Path(args.download_dir)
-
-    # 2) 获取 latest release 并定位目标资源。
-    latest_release = fetch_json(REPO_RELEASE_API)
-    if not isinstance(latest_release, dict):
-        print("错误：release API 返回结果格式异常。", file=sys.stderr)
-        return 1
-
-    asset = find_asset(latest_release, TARGET_ASSET_NAME)
-
-    release_name = latest_release.get("name") or latest_release.get("tag_name") or ""
-    browser_download_url = asset.get("browser_download_url")
-    asset_name = asset.get("name")
-    if not browser_download_url or not asset_name:
-        print("错误：目标资源缺少下载地址或文件名。", file=sys.stderr)
-        return 1
-
-    # 3) 与本地版本文件中的哈希对比，决定是否需要更新。
-    asset_digest = (asset.get("digest") or "").strip()
-    if asset_digest.startswith("sha256:"):
-        asset_digest = asset_digest.split(":", 1)[1]
-
-    if args.force_download:
-        print("已启用强制下载，跳过本地版本记录比对。")
-    else:
-        current = load_json(version_path)
-        current_digest = str(current.get("sha256", "")).strip()
-        if asset_digest and current_digest == asset_digest:
-            print("anime-offline-database 已是最新（digest 未变化）。")
-            return 0
-
-    # 4) 下载资源并做 SHA256 完整性校验。
-    zst_path = download_dir / asset_name
-    print(f"开始下载：{browser_download_url}")
-    download_file(browser_download_url, zst_path)
-
-    actual_sha256 = sha256_file(zst_path)
-    if asset_digest and actual_sha256 != asset_digest:
-        print(
-            "错误：下载文件 SHA256 校验不一致。"
-            f"期望值={asset_digest} 实际值={actual_sha256}",
-            file=sys.stderr,
+    try:
+        update_anime_offline_database(
+            version_file=args.version_file,
+            output_jsonl=args.output_jsonl,
+            download_dir=args.download_dir,
+            force_download=args.force_download,
         )
+    except RuntimeError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
         return 1
 
-    # 5) 解压 jsonl 并写回版本信息。
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    print(f"开始解压到：{output_jsonl}")
-    decompress_zst(zst_path, output_jsonl)
-
-    save_json(
-        version_path,
-        {
-            "release": release_name,
-            "tag": latest_release.get("tag_name", ""),
-            "asset": asset_name,
-            "sha256": actual_sha256,
-            "published_at": latest_release.get("published_at", ""),
-            "source": latest_release.get("html_url", ""),
-        },
-    )
-    print(f"版本元数据已更新：{version_path}")
     return 0
 
 

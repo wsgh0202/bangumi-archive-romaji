@@ -10,10 +10,21 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
+from update_anime_offline_database import (
+    check_anime_offline_database_changed,
+    update_anime_offline_database,
+)
+from update_bangumi_archive import (
+    check_bangumi_archive_changed,
+    update_bangumi_archive,
+)
+
 
 DEFAULT_BANGUMI_VERSION_FILE = Path("version/bangumi.json")
 DEFAULT_ANIME_VERSION_FILE = Path("version/anime-offline-database.json")
 DEFAULT_BANGUMI_BUILD_DIR = Path("build/bangumi_archive")
+DEFAULT_ANIME_OUTPUT_JSONL = Path("build/anime-offline-database.jsonl")
+DEFAULT_DOWNLOAD_DIR = Path("downloads")
 DEFAULT_MERGED_SUBJECT_FILE = Path("build/bangumi_alias_merged.jsonl")
 DEFAULT_MERGED_OUTPUT_NAME = Path("bangumi-archive-merged.zip")
 DEFAULT_DIST_DIR = Path("dist")
@@ -78,6 +89,67 @@ def build_release_asset_url(
             "必须提供 --browser-download-url，或同时提供 --github-repo 与 --release-tag。"
         )
     return f"https://github.com/{repo}/releases/download/{tag}/{asset_name}"
+
+
+def write_github_output(path: str | None, key: str, value: str) -> None:
+    """向 GitHub Actions step output 写入键值对。"""
+    if not path:
+        return
+
+    with Path(path).open("a", encoding="utf-8") as handle:
+        handle.write(f"{key}={value}\n")
+
+
+def prepare_build(args: argparse.Namespace) -> int:
+    """更新所有数据源，并决定后续构建是否可以跳过。"""
+    # 检查数据源相对本地版本记录是否发生变化
+    bangumi_changed = args.force_download or check_bangumi_archive_changed(
+        version_file=str(DEFAULT_BANGUMI_VERSION_FILE),
+    )
+    anime_changed = args.force_download or check_anime_offline_database_changed(
+        version_file=str(DEFAULT_ANIME_VERSION_FILE),
+    )
+
+    # 根据数据源变更情况决定是否跳过后续构建，并将结果写入 GitHub Actions 输出供后续 step 使用。
+    skip = not bangumi_changed and not anime_changed
+    write_github_output(args.github_output, "skip", "true" if skip else "false")
+
+    if skip:
+        print("所有数据源均无更新，跳过构建。")
+        return 0
+
+    bangumi_subject_path = DEFAULT_BANGUMI_BUILD_DIR / "subject.jsonlines"
+    anime_output_path = DEFAULT_ANIME_OUTPUT_JSONL
+    bangumi_force_download = args.force_download
+    anime_force_download = args.force_download
+
+    # 判断是否需要强制下载
+    if not bangumi_changed and not bangumi_subject_path.is_file():
+        print("Bangumi 数据源未更新，但本地构建输入缺失，强制下载当前版本。")
+        bangumi_force_download = True
+
+    if not anime_changed and not anime_output_path.is_file():
+        print(
+            "anime-offline-database 数据源未更新，但本地构建输入缺失，强制下载当前版本。"
+        )
+        anime_force_download = True
+
+    # 下载数据源
+    update_bangumi_archive(
+        version_file=str(DEFAULT_BANGUMI_VERSION_FILE),
+        download_dir=str(DEFAULT_DOWNLOAD_DIR),
+        extract_dir=str(DEFAULT_BANGUMI_BUILD_DIR),
+        force_download=bangumi_force_download,
+    )
+    update_anime_offline_database(
+        version_file=str(DEFAULT_ANIME_VERSION_FILE),
+        output_jsonl=str(DEFAULT_ANIME_OUTPUT_JSONL),
+        download_dir=str(DEFAULT_DOWNLOAD_DIR),
+        force_download=anime_force_download,
+    )
+
+    print("检测到数据源更新，继续构建。")
+    return 0
 
 
 def package_zip(args: argparse.Namespace) -> int:
@@ -271,6 +343,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="zip 文件名。",
     )
     package_parser.set_defaults(func=package_zip)
+
+    prepare_parser = subparsers.add_parser(
+        "prepare-build",
+        help="更新数据源并判断是否需要继续构建。",
+    )
+    prepare_parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="忽略本地版本记录，强制重新下载所有数据源。",
+    )
+    prepare_parser.add_argument(
+        "--github-output",
+        help="GitHub Actions 的 GITHUB_OUTPUT 文件路径，用于写出 skip 状态。",
+    )
+    prepare_parser.set_defaults(func=prepare_build)
 
     # 配置用于生成 latest.json 元数据的子命令。
     latest_parser = subparsers.add_parser(

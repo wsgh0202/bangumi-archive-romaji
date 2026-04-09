@@ -29,53 +29,14 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y zstd
 
-      - name: Update Bangumi Archive
-        id: update_bangumi
-        run: |
-          FORCE_FLAG=""
-          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
-            FORCE_FLAG="--force-download"
-          fi
-          OUTPUT=$(python update_bangumi_archive.py $FORCE_FLAG 2>&1) || EXIT_CODE=$?
-          echo "$OUTPUT"
-          if [[ ${EXIT_CODE:-0} -ne 0 ]]; then
-            exit $EXIT_CODE
-          fi
-          if echo "$OUTPUT" | grep -q "已是最新"; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Update anime-offline-database
-        id: update_anime
-        run: |
-          FORCE_FLAG=""
-          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
-            FORCE_FLAG="--force-download"
-          fi
-          OUTPUT=$(python update_anime_offline_database.py $FORCE_FLAG 2>&1) || EXIT_CODE=$?
-          echo "$OUTPUT"
-          if [[ ${EXIT_CODE:-0} -ne 0 ]]; then
-            exit $EXIT_CODE
-          fi
-          if echo "$OUTPUT" | grep -q "已是最新"; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check if build is needed
+      - name: Prepare build inputs
         id: check_build
         run: |
-          if [[ "${{ steps.update_bangumi.outputs.changed }}" == "false" ]] && \
-             [[ "${{ steps.update_anime.outputs.changed }}" == "false" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "两个数据源均无更新，跳过构建。"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "检测到数据源更新，继续构建。"
+          ARGS=(prepare-build --github-output "$GITHUB_OUTPUT")
+          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
+            ARGS+=(--force-download)
           fi
+          python release_ci.py "${ARGS[@]}"
 
       - name: Merge aliases
         if: steps.check_build.outputs.skip != 'true'
